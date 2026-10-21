@@ -1,6 +1,6 @@
 from django.conf import settings
 from django.db import models
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.utils import timezone
 
 from .constants import MAX_EXTENSIONS
@@ -15,11 +15,25 @@ class CopyStatus(models.TextChoices):
     LOST = "lost", "Утерян"
 
 
+class BookQuerySet(models.QuerySet):
+    def with_available_copies(self):
+        return self.annotate(
+            available_copies=Count(
+                "copies", filter=Q(copies__status=CopyStatus.AVAILABLE)
+            )
+        )
+
+    def search(self, text):
+        return self.filter(Q(title__icontains=text) | Q(author__icontains=text))
+
+
 class Book(models.Model):
     title = models.CharField(max_length=200)
     author = models.CharField(max_length=200)
     isbn = models.CharField(max_length=13, unique=True)
     year = models.IntegerField()
+
+    objects = BookQuerySet.as_manager()
 
     class Meta:
         ordering = ["title", "id"]

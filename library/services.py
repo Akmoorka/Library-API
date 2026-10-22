@@ -1,8 +1,9 @@
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
+from django.utils import timezone
 
 from .exceptions import BusinessValidationError, PermissionDeniedError
-from .models import Book, Copy
+from .models import Book, Copy, Notification
 
 User = get_user_model()
 
@@ -48,3 +49,13 @@ def copy_create(*, actor, book_id, inventory_number) -> Copy:
             return Copy.objects.create(book=book, inventory_number=inventory_number)
     except IntegrityError:
         raise _field_error("inventory_number", "Экземпляр с таким номером уже есть.")
+
+
+def notification_send(*, notification_id, now=None) -> None:
+    """Вызывается Celery-задачей. Идемпотентна: повтор не меняет sent_at."""
+    try:
+        notification = Notification.objects.get(pk=notification_id)
+    except Notification.DoesNotExist:
+        return  # удалили, отправлять нечего
+    # Здесь была бы реальная доставка (почта, push); пока только отметка.
+    notification.mark_sent(now or timezone.now())

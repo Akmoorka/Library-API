@@ -1,7 +1,11 @@
+from datetime import timedelta
+
 from django.test import TestCase
+from django.utils import timezone
 
 from library import services
 from library.exceptions import BusinessValidationError, PermissionDeniedError
+from library.models import Notification
 from library.tests.factories import BookFactory, UserFactory
 
 PASSWORD = "S3cure-pass-77"
@@ -74,3 +78,32 @@ class CatalogTests(TestCase):
                 actor=self.librarian, book_id=book.pk, inventory_number="INV-1"
             )
         self.assertIn("inventory_number", ctx.exception.extra["fields"])
+
+
+class NotificationSendTests(TestCase):
+    def test_send_sets_sent_at_only_once(self):
+        notification = Notification.objects.create(
+            recipient=UserFactory(), kind=Notification.Kind.LOAN_ISSUED
+        )
+        first = timezone.now()
+        services.notification_send(notification_id=notification.pk, now=first)
+        services.notification_send(
+            notification_id=notification.pk, now=first + timedelta(hours=1)
+        )
+        notification.refresh_from_db()
+        self.assertEqual(notification.sent_at, first)
+
+    def test_send_missing_notification_is_silent(self):
+        services.notification_send(notification_id=999999)
+
+
+class CeleryTaskTests(TestCase):
+    def test_task_marks_notification_sent(self):
+        from library.tasks import notification_send_task
+
+        notification = Notification.objects.create(
+            recipient=UserFactory(), kind=Notification.Kind.LOAN_ISSUED
+        )
+        notification_send_task.delay(notification_id=notification.pk)
+        notification.refresh_from_db()
+        self.assertIsNotNone(notification.sent_at)

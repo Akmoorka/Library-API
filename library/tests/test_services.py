@@ -1,12 +1,19 @@
 from datetime import timedelta
+from unittest import mock
 
 from django.test import TestCase
 from django.utils import timezone
 
 from library import services
+from library.constants import LOAN_PERIOD
 from library.exceptions import BusinessValidationError, PermissionDeniedError
-from library.models import Notification
-from library.tests.factories import BookFactory, UserFactory
+from library.models import CopyStatus, Loan, Notification
+from library.tests.factories import (
+    BookFactory,
+    CopyFactory,
+    LoanFactory,
+    UserFactory,
+)
 
 PASSWORD = "S3cure-pass-77"
 
@@ -107,3 +114,81 @@ class CeleryTaskTests(TestCase):
         notification_send_task.delay(notification_id=notification.pk)
         notification.refresh_from_db()
         self.assertIsNotNone(notification.sent_at)
+
+
+class LoanCreateTests(TestCase):
+    def setUp(self):
+        self.librarian = UserFactory(is_staff=True)
+        self.reader = UserFactory()
+        self.copy = CopyFactory()
+
+    def issue(self, **kwargs):
+        params = dict(
+            actor=self.librarian, copy_id=self.copy.pk, reader_id=self.reader.pk
+        )
+        params.update(kwargs)
+        return services.loan_create(**params)
+
+    def test_reader_cannot_issue(self):
+        with self.assertRaises(PermissionDeniedError):
+            self.issue(actor=self.reader)
+
+    def test_missing_copy_is_business_error(self):
+        with self.assertRaises(BusinessValidationError) as ctx:
+            self.issue(copy_id=999999)
+        self.assertIn("copy", ctx.exception.extra["fields"])
+
+    def test_missing_reader_is_business_error(self):
+        with self.assertRaises(BusinessValidationError) as ctx:
+            self.issue(reader_id=999999)
+        self.assertIn("reader", ctx.exception.extra["fields"])
+
+    def test_loaned_copy_is_rejected(self):
+        self.issue()
+        with self.assertRaises(BusinessValidationError):
+            self.issue(reader_id=UserFactory().pk)
+
+    def test_db_constraint_is_translated_to_business_error(self):
+        LoanFactory(copy=self.copy)  # статус остался available
+        with self.assertRaises(BusinessValidationError) as ctx:
+            self.issue()
+        self.assertIn("copy", ctx.exception.extra["fields"])
+
+    def test_fourth_loan_is_rejected(self):
+        LoanFactory.create_batch(3, reader=self.reader)
+        with self.assertRaises(BusinessValidationError) as ctx:
+            self.issue()
+        self.assertIn("reader", ctx.exception.extra["fields"])
+
+    def test_reader_with_overdue_loan_is_rejected(self):
+        LoanFactory(reader=self.reader, due_at=timezone.now() - timedelta(days=1))
+        with self.assertRaises(BusinessValidationError):
+            self.issue()
+
+    def test_successful_issue_sets_due_date_and_status(self):
+        now = timezone.now()
+        loan = self.issue(now=now)
+        self.assertEqual(loan.due_at, now + LOAN_PERIOD)
+        self.copy.refresh_from_db()
+        self.assertEqual(self.copy.status, CopyStatus.ON_LOAN)
+
+    def test_issue_creates_one_notification_sent_after_commit(self):
+        with self.captureOnCommitCallbacks(execute=True) as callbacks:
+            loan = self.issue()
+        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(Notification.objects.count(), 1)
+        notification = Notification.objects.get(loan=loan)
+        self.assertEqual(notification.recipient, self.reader)
+        self.assertIsNotNone(notification.sent_at)
+
+    def test_failure_leaves_no_loan_and_no_notification(self):
+        with mock.patch(
+            "library.services.Notification.objects.create",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.issue()
+        self.assertEqual(Loan.objects.count(), 0)
+        self.assertEqual(Notification.objects.count(), 0)
+        self.copy.refresh_from_db()
+        self.assertEqual(self.copy.status, CopyStatus.AVAILABLE)

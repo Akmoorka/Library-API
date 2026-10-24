@@ -6,7 +6,11 @@ from django.utils import timezone
 
 from library import services
 from library.constants import LOAN_PERIOD
-from library.exceptions import BusinessValidationError, PermissionDeniedError
+from library.exceptions import (
+    BusinessValidationError,
+    NotFoundError,
+    PermissionDeniedError,
+)
 from library.models import CopyStatus, Loan, Notification
 from library.tests.factories import (
     BookFactory,
@@ -192,3 +196,47 @@ class LoanCreateTests(TestCase):
         self.assertEqual(Notification.objects.count(), 0)
         self.copy.refresh_from_db()
         self.assertEqual(self.copy.status, CopyStatus.AVAILABLE)
+
+
+class LoanReturnTests(TestCase):
+    def setUp(self):
+        self.librarian = UserFactory(is_staff=True)
+        self.reader = UserFactory()
+        self.copy = CopyFactory()
+        self.loan = services.loan_create(
+            actor=self.librarian, copy_id=self.copy.pk, reader_id=self.reader.pk
+        )
+
+    def test_return_sets_returned_at_and_frees_copy(self):
+        now = timezone.now()
+        loan = services.loan_return(
+            actor=self.librarian, loan_id=self.loan.pk, now=now
+        )
+        self.assertEqual(loan.returned_at, now)
+        self.copy.refresh_from_db()
+        self.assertEqual(self.copy.status, CopyStatus.AVAILABLE)
+
+    def test_reader_cannot_return_own_loan(self):
+        with self.assertRaises(PermissionDeniedError):
+            services.loan_return(actor=self.reader, loan_id=self.loan.pk)
+
+    def test_foreign_loan_is_not_found_for_other_reader(self):
+        with self.assertRaises(NotFoundError):
+            services.loan_return(actor=UserFactory(), loan_id=self.loan.pk)
+
+    def test_missing_loan_is_not_found(self):
+        with self.assertRaises(NotFoundError):
+            services.loan_return(actor=self.librarian, loan_id=999999)
+
+    def test_second_return_is_business_error(self):
+        services.loan_return(actor=self.librarian, loan_id=self.loan.pk)
+        with self.assertRaises(BusinessValidationError) as ctx:
+            services.loan_return(actor=self.librarian, loan_id=self.loan.pk)
+        self.assertIn("loan", ctx.exception.extra["fields"])
+
+    def test_returned_copy_can_be_issued_again(self):
+        services.loan_return(actor=self.librarian, loan_id=self.loan.pk)
+        again = services.loan_create(
+            actor=self.librarian, copy_id=self.copy.pk, reader_id=UserFactory().pk
+        )
+        self.assertIsNone(again.returned_at)

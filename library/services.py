@@ -5,6 +5,7 @@ from django.utils import timezone
 from .exceptions import BusinessValidationError, PermissionDeniedError
 from .constants import LOAN_PERIOD, MAX_ACTIVE_LOANS
 from .models import Book, Copy, CopyStatus, Loan, Notification
+from .selectors import loan_get
 from .tasks import notification_send_task
 
 User = get_user_model()
@@ -116,4 +117,18 @@ def loan_create(*, actor, copy_id, reader_id, now=None) -> Loan:
     copy.status = CopyStatus.ON_LOAN
     copy.save(update_fields=["status"])
     _notify_issued(loan=loan)
+    return loan
+
+
+@transaction.atomic
+def loan_return(*, actor, loan_id, now=None) -> Loan:
+    now = now or timezone.now()
+    visible = loan_get(user=actor, loan_id=loan_id)  # 404: чужая тоже 404
+    _require_librarian(actor)  # 403
+    # Порядок блокировок как в loan_create: сначала экземпляр, потом выдача.
+    copy = Copy.objects.select_for_update().get(pk=visible.copy_id)
+    loan = Loan.objects.select_for_update().get(pk=visible.pk)  # свежее состояние
+    loan.mark_returned(now)  # 400, если уже возвращена
+    copy.status = CopyStatus.AVAILABLE
+    copy.save(update_fields=["status"])
     return loan

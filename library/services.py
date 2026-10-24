@@ -3,7 +3,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from .exceptions import BusinessValidationError, PermissionDeniedError
-from .constants import LOAN_PERIOD, MAX_ACTIVE_LOANS
+from .constants import EXTENSION_PERIOD, LOAN_PERIOD, MAX_ACTIVE_LOANS
 from .models import Book, Copy, CopyStatus, Loan, Notification
 from .selectors import loan_get
 from .tasks import notification_send_task
@@ -131,4 +131,18 @@ def loan_return(*, actor, loan_id, now=None) -> Loan:
     loan.mark_returned(now)  # 400, если уже возвращена
     copy.status = CopyStatus.AVAILABLE
     copy.save(update_fields=["status"])
+    return loan
+
+
+@transaction.atomic
+def loan_extend(*, actor, loan_id, now=None) -> Loan:
+    now = now or timezone.now()
+    visible = loan_get(user=actor, loan_id=loan_id)  # 404: чужая тоже 404
+    _require_librarian(actor)  # 403
+    loan = Loan.objects.select_for_update().get(pk=visible.pk)  # свежее состояние
+    # Просрочку смотрим только у незакрытой выдачи: у закрытой правильное
+    # сообщение «выдача закрыта», его даёт метод extend.
+    if loan.returned_at is None and loan.due_at < now:
+        raise _field_error("loan", "Просроченную выдачу продлить нельзя.")  # 400
+    loan.extend(EXTENSION_PERIOD)  # 400: закрыта или уже два продления
     return loan

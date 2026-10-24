@@ -5,7 +5,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from library import services
-from library.constants import LOAN_PERIOD
+from library.constants import EXTENSION_PERIOD, LOAN_PERIOD
 from library.exceptions import (
     BusinessValidationError,
     NotFoundError,
@@ -240,3 +240,62 @@ class LoanReturnTests(TestCase):
             actor=self.librarian, copy_id=self.copy.pk, reader_id=UserFactory().pk
         )
         self.assertIsNone(again.returned_at)
+
+
+class LoanExtendTests(TestCase):
+    def setUp(self):
+        self.librarian = UserFactory(is_staff=True)
+        self.reader = UserFactory()
+        self.loan = LoanFactory(reader=self.reader)
+
+    def extend(self, **kwargs):
+        params = dict(actor=self.librarian, loan_id=self.loan.pk)
+        params.update(kwargs)
+        return services.loan_extend(**params)
+
+    def test_extend_adds_seven_days_and_counts(self):
+        before = self.loan.due_at
+        loan = self.extend()
+        self.assertEqual(loan.due_at, before + EXTENSION_PERIOD)
+        self.assertEqual(loan.extensions, 1)
+
+    def test_third_extension_is_rejected(self):
+        self.extend()
+        self.extend()
+        with self.assertRaises(BusinessValidationError) as ctx:
+            self.extend()
+        self.assertIn("loan", ctx.exception.extra["fields"])
+        self.loan.refresh_from_db()
+        self.assertEqual(self.loan.extensions, 2)
+
+    def test_overdue_loan_cannot_be_extended(self):
+        overdue = LoanFactory(due_at=timezone.now() - timedelta(days=1))
+        with self.assertRaises(BusinessValidationError) as ctx:
+            self.extend(loan_id=overdue.pk)
+        self.assertIn("loan", ctx.exception.extra["fields"])
+
+    def test_returned_loan_cannot_be_extended(self):
+        returned = LoanFactory(returned_at=timezone.now())
+        with self.assertRaises(BusinessValidationError):
+            self.extend(loan_id=returned.pk)
+
+    def test_returned_past_due_loan_reports_closed_not_overdue(self):
+        closed = LoanFactory(
+            due_at=timezone.now() - timedelta(days=5),
+            returned_at=timezone.now() - timedelta(days=1),
+        )
+        with self.assertRaises(BusinessValidationError) as ctx:
+            self.extend(loan_id=closed.pk)
+        self.assertIn("закрыт", ctx.exception.message)
+
+    def test_reader_cannot_extend_own_loan(self):
+        with self.assertRaises(PermissionDeniedError):
+            self.extend(actor=self.reader)
+
+    def test_foreign_loan_is_not_found(self):
+        with self.assertRaises(NotFoundError):
+            self.extend(actor=UserFactory())
+
+    def test_missing_loan_is_not_found(self):
+        with self.assertRaises(NotFoundError):
+            self.extend(loan_id=999999)

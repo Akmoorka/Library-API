@@ -116,15 +116,24 @@ class Loan(models.Model):
 
     def mark_returned(self, now):
         if self.returned_at is not None:
-            raise BusinessValidationError("Выдача уже закрыта.")
+            raise BusinessValidationError(
+                "Выдача уже закрыта.",
+                extra={"fields": {"loan": ["Выдача уже закрыта."]}},
+            )
         self.returned_at = now
         self.save(update_fields=["returned_at"])
 
     def extend(self, period):
         if self.returned_at is not None:
-            raise BusinessValidationError("Нельзя продлить закрытую выдачу.")
+            raise BusinessValidationError(
+                "Нельзя продлить закрытую выдачу.",
+                extra={"fields": {"loan": ["Нельзя продлить закрытую выдачу."]}},
+            )
         if self.extensions >= MAX_EXTENSIONS:
-            raise BusinessValidationError("Продлевать можно не больше двух раз.")
+            raise BusinessValidationError(
+                "Продлевать можно не больше двух раз.",
+                extra={"fields": {"loan": ["Продлевать можно не больше двух раз."]}},
+            )
         self.due_at = self.due_at + period
         self.extensions += 1
         self.save(update_fields=["due_at", "extensions"])
